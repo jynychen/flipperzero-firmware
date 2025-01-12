@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
+import binascii
+import filecmp
+import os
+import tempfile
+
 from flipper.app import App
 from flipper.storage import FlipperStorage, FlipperStorageOperations
 from flipper.utils.cdc import resolve_port
-
-import os
-import binascii
-import filecmp
-import tempfile
 
 
 def WrapStorageOp(func):
@@ -74,7 +74,7 @@ class Main(App):
         self.parser_list.set_defaults(func=self.list)
 
         self.parser_stress = self.subparsers.add_parser("stress", help="Stress test")
-        self.parser.add_argument(
+        self.parser_stress.add_argument(
             "-c", "--count", type=int, default=10, help="Iteration count"
         )
         self.parser_stress.add_argument("flipper_path", help="Flipper path")
@@ -122,7 +122,7 @@ class Main(App):
             try:
                 print("Text data:")
                 print(data.decode())
-            except:
+            except Exception:
                 print("Binary hexadecimal data:")
                 print(binascii.hexlify(data).decode())
 

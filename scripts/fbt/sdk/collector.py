@@ -1,4 +1,5 @@
 from typing import List
+from .hashes import gnu_sym_hash
 
 from cxxheaderparser.parser import CxxParser
 from . import (
@@ -37,7 +38,6 @@ from cxxheaderparser.types import (
 
 from cxxheaderparser.parserstate import (
     State,
-    EmptyBlockState,
     ClassBlockState,
     ExternBlockState,
     NamespaceBlockState,
@@ -70,13 +70,6 @@ class SymbolManager:
 
     def add_header(self, header: str):
         self.api.headers.add(ApiHeader(header))
-
-
-def gnu_sym_hash(name: str):
-    h = 0x1505
-    for c in name:
-        h = (h << 5) + h + ord(c)
-    return str(hex(h))[-8:]
 
 
 class SdkCollector:
@@ -186,12 +179,6 @@ class SdkCxxVisitor:
     def on_include(self, state: State, filename: str) -> None:
         pass
 
-    def on_empty_block_start(self, state: EmptyBlockState) -> None:
-        pass
-
-    def on_empty_block_end(self, state: EmptyBlockState) -> None:
-        pass
-
     def on_extern_block_start(self, state: ExternBlockState) -> None:
         pass
 
@@ -235,4 +222,7 @@ class SdkCxxVisitor:
         pass
 
     def on_class_end(self, state: ClassBlockState) -> None:
+        pass
+
+    def on_parse_start(self, state: NamespaceBlockState) -> None:
         pass

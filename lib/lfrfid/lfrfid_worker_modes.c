@@ -5,9 +5,9 @@
 #include <toolbox/pulse_protocols/pulse_glue.h>
 #include <toolbox/buffer_stream.h>
 #include "tools/varint_pair.h"
-#include "tools/bit_lib.h"
+#include <lib/bit_lib/bit_lib.h>
 
-#define TAG "LFRFIDWorker"
+#define TAG "LfRfidWorker"
 
 /**
  * if READ_DEBUG_GPIO is defined:
@@ -18,23 +18,23 @@
 
 #ifdef LFRFID_WORKER_READ_DEBUG_GPIO
 #define LFRFID_WORKER_READ_DEBUG_GPIO_VALUE &gpio_ext_pa7
-#define LFRFID_WORKER_READ_DEBUG_GPIO_LOAD &gpio_ext_pa6
+#define LFRFID_WORKER_READ_DEBUG_GPIO_LOAD  &gpio_ext_pa6
 #endif
 
 #define LFRFID_WORKER_READ_AVERAGE_COUNT 64
-#define LFRFID_WORKER_READ_MIN_TIME_US 16
+#define LFRFID_WORKER_READ_MIN_TIME_US   16
 
-#define LFRFID_WORKER_READ_DROP_TIME_MS 50
+#define LFRFID_WORKER_READ_DROP_TIME_MS      50
 #define LFRFID_WORKER_READ_STABILIZE_TIME_MS 450
-#define LFRFID_WORKER_READ_SWITCH_TIME_MS 2000
+#define LFRFID_WORKER_READ_SWITCH_TIME_MS    2000
 
-#define LFRFID_WORKER_WRITE_VERIFY_TIME_MS 2000
-#define LFRFID_WORKER_WRITE_DROP_TIME_MS 50
+#define LFRFID_WORKER_WRITE_VERIFY_TIME_MS   2000
+#define LFRFID_WORKER_WRITE_DROP_TIME_MS     50
 #define LFRFID_WORKER_WRITE_TOO_LONG_TIME_MS 10000
 
 #define LFRFID_WORKER_WRITE_MAX_UNSUCCESSFUL_READS 5
 
-#define LFRFID_WORKER_READ_BUFFER_SIZE 512
+#define LFRFID_WORKER_READ_BUFFER_SIZE  512
 #define LFRFID_WORKER_READ_BUFFER_COUNT 16
 
 #define LFRFID_WORKER_EMULATE_BUFFER_SIZE 1024
@@ -100,23 +100,20 @@ static LFRFIDWorkerReadState lfrfid_worker_read_internal(
     uint32_t timeout,
     ProtocolId* result_protocol) {
     LFRFIDWorkerReadState state = LFRFIDWorkerReadTimeout;
-    furi_hal_rfid_pins_read();
 
     if(feature & LFRFIDFeatureASK) {
-        furi_hal_rfid_tim_read(125000, 0.5);
+        furi_hal_rfid_tim_read_start(125000, 0.5);
         FURI_LOG_D(TAG, "Start ASK");
         if(worker->read_cb) {
             worker->read_cb(LFRFIDWorkerReadStartASK, PROTOCOL_NO, worker->cb_ctx);
         }
     } else {
-        furi_hal_rfid_tim_read(62500, 0.25);
+        furi_hal_rfid_tim_read_start(62500, 0.25);
         FURI_LOG_D(TAG, "Start PSK");
         if(worker->read_cb) {
             worker->read_cb(LFRFIDWorkerReadStartPSK, PROTOCOL_NO, worker->cb_ctx);
         }
     }
-
-    furi_hal_rfid_tim_read_start();
 
     // stabilize detector
     lfrfid_worker_delay(worker, LFRFID_WORKER_READ_STABILIZE_TIME_MS);
@@ -205,7 +202,7 @@ static LFRFIDWorkerReadState lfrfid_worker_read_internal(
                     average_index = 0;
 
                     if(worker->read_cb) {
-                        if(average > 0.2 && average < 0.8) {
+                        if(average > 0.2f && average < 0.8f) {
                             if(!card_detected) {
                                 card_detected = true;
                                 worker->read_cb(

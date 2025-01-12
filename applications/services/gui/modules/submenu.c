@@ -63,7 +63,7 @@ static void submenu_view_draw_callback(Canvas* canvas, void* _model) {
     SubmenuModel* model = _model;
 
     const uint8_t item_height = 16;
-    const uint8_t item_width = 123;
+    uint8_t item_width = canvas_width(canvas) - 5;
 
     canvas_clear(canvas);
 
@@ -98,7 +98,7 @@ static void submenu_view_draw_callback(Canvas* canvas, void* _model) {
 
             FuriString* disp_str;
             disp_str = furi_string_alloc_set(SubmenuItemArray_cref(it)->label);
-            elements_string_fit_width(canvas, disp_str, item_width - 20);
+            elements_string_fit_width(canvas, disp_str, item_width - (6 * 2));
 
             canvas_draw_str(
                 canvas,
@@ -150,7 +150,7 @@ static bool submenu_view_input_callback(InputEvent* event, void* context) {
     return consumed;
 }
 
-Submenu* submenu_alloc() {
+Submenu* submenu_alloc(void) {
     Submenu* submenu = malloc(sizeof(Submenu));
     submenu->view = view_alloc();
     view_set_context(submenu->view, submenu);
@@ -173,7 +173,7 @@ Submenu* submenu_alloc() {
 }
 
 void submenu_free(Submenu* submenu) {
-    furi_assert(submenu);
+    furi_check(submenu);
 
     with_view_model(
         submenu->view,
@@ -188,7 +188,7 @@ void submenu_free(Submenu* submenu) {
 }
 
 View* submenu_get_view(Submenu* submenu) {
-    furi_assert(submenu);
+    furi_check(submenu);
     return submenu->view;
 }
 
@@ -199,8 +199,8 @@ void submenu_add_item(
     SubmenuItemCallback callback,
     void* callback_context) {
     SubmenuItem* item = NULL;
-    furi_assert(label);
-    furi_assert(submenu);
+    furi_check(label);
+    furi_check(submenu);
 
     with_view_model(
         submenu->view,
@@ -215,8 +215,28 @@ void submenu_add_item(
         true);
 }
 
+void submenu_change_item_label(Submenu* submenu, uint32_t index, const char* label) {
+    furi_check(submenu);
+    furi_check(label);
+
+    with_view_model(
+        submenu->view,
+        SubmenuModel * model,
+        {
+            SubmenuItemArray_it_t it;
+            for(SubmenuItemArray_it(it, model->items); !SubmenuItemArray_end_p(it);
+                SubmenuItemArray_next(it)) {
+                if(index == SubmenuItemArray_cref(it)->index) {
+                    furi_string_set_str(SubmenuItemArray_cref(it)->label, label);
+                    break;
+                }
+            }
+        },
+        true);
+}
+
 void submenu_reset(Submenu* submenu) {
-    furi_assert(submenu);
+    furi_check(submenu);
 
     with_view_model(
         submenu->view,
@@ -230,7 +250,27 @@ void submenu_reset(Submenu* submenu) {
         true);
 }
 
+uint32_t submenu_get_selected_item(Submenu* submenu) {
+    furi_check(submenu);
+
+    uint32_t selected_item_index = 0;
+
+    with_view_model(
+        submenu->view,
+        SubmenuModel * model,
+        {
+            if(model->position < SubmenuItemArray_size(model->items)) {
+                const SubmenuItem* item = SubmenuItemArray_cget(model->items, model->position);
+                selected_item_index = item->index;
+            }
+        },
+        false);
+
+    return selected_item_index;
+}
+
 void submenu_set_selected_item(Submenu* submenu, uint32_t index) {
+    furi_check(submenu);
     with_view_model(
         submenu->view,
         SubmenuModel * model,
@@ -337,7 +377,7 @@ void submenu_process_ok(Submenu* submenu) {
 }
 
 void submenu_set_header(Submenu* submenu, const char* header) {
-    furi_assert(submenu);
+    furi_check(submenu);
 
     with_view_model(
         submenu->view,

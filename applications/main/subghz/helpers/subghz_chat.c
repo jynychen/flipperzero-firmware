@@ -2,6 +2,7 @@
 #include <lib/subghz/subghz_tx_rx_worker.h>
 
 #define TAG "SubGhzChat"
+
 #define SUBGHZ_CHAT_WORKER_TIMEOUT_BETWEEN_MESSAGES 500
 
 struct SubGhzChatWorker {
@@ -76,12 +77,15 @@ void subghz_chat_worker_free(SubGhzChatWorker* instance) {
     free(instance);
 }
 
-bool subghz_chat_worker_start(SubGhzChatWorker* instance, uint32_t frequency) {
+bool subghz_chat_worker_start(
+    SubGhzChatWorker* instance,
+    const SubGhzDevice* device,
+    uint32_t frequency) {
     furi_assert(instance);
     furi_assert(!instance->worker_running);
     bool res = false;
 
-    if(subghz_tx_rx_worker_start(instance->subghz_txrx, frequency)) {
+    if(subghz_tx_rx_worker_start(instance->subghz_txrx, device, frequency)) {
         furi_message_queue_reset(instance->event_queue);
         subghz_tx_rx_worker_set_callback_have_read(
             instance->subghz_txrx, subghz_chat_worker_update_rx_event_chat, instance);

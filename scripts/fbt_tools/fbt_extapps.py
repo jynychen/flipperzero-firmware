@@ -1,24 +1,22 @@
 import itertools
-import os
 import pathlib
-import shutil
 from dataclasses import dataclass, field
-from typing import Optional, TypedDict
-
-from ansi.color import fg
+from typing import Dict, List, Optional
 
 import SCons.Warnings
-from SCons.Action import Action
-from SCons.Builder import Builder
-from SCons.Errors import UserError
-from SCons.Node import NodeList
-from SCons.Node.FS import File, Entry
-
+from ansi.color import fg
 from fbt.appmanifest import FlipperApplication, FlipperAppType, FlipperManifestException
 from fbt.elfmanifest import assemble_manifest_data
 from fbt.fapassets import FileBundler
 from fbt.sdk.cache import SdkCache
-from fbt.util import extract_abs_dir_path
+from fbt.util import resolve_real_dir_node
+from SCons.Action import Action
+from SCons.Builder import Builder
+from SCons.Errors import UserError
+from SCons.Node.FS import Entry, File
+
+_FAP_META_SECTION = ".fapmeta"
+_FAP_FILEASSETS_SECTION = ".fapassets"
 
 
 @dataclass
@@ -32,12 +30,17 @@ class FlipperExternalAppInfo:
 
 
 class AppBuilder:
+    @staticmethod
+    def get_app_work_dir(env, app):
+        return env["EXT_APPS_WORK_DIR"].Dir(app.appid)
+
     def __init__(self, env, app):
         self.fw_env = env
         self.app = app
-        self.ext_apps_work_dir = env.subst("$EXT_APPS_WORK_DIR")
-        self.app_work_dir = os.path.join(self.ext_apps_work_dir, self.app.appid)
+        self.ext_apps_work_dir = env["EXT_APPS_WORK_DIR"]
+        self.app_work_dir = self.get_app_work_dir(env, app)
         self.app_alias = f"fap_{self.app.appid}"
+        self.icons_src = None
         self.externally_built_files = []
         self.private_libs = []
 
@@ -50,7 +53,14 @@ class AppBuilder:
 
     def _setup_app_env(self):
         self.app_env = self.fw_env.Clone(
-            FAP_SRC_DIR=self.app._appdir, FAP_WORK_DIR=self.app_work_dir
+            FAP_SRC_DIR=self.app._appdir,
+            FAP_WORK_DIR=self.app_work_dir,
+        )
+        self.app_env.Append(
+            CPPDEFINES=[
+                ("FAP_VERSION", f'\\"{".".join(map(str, self.app.fap_version))}\\"'),
+                *self.app.cdefines,
+            ],
         )
         self.app_env.VariantDir(self.app_work_dir, self.app._appdir, duplicate=False)
 
@@ -77,19 +87,20 @@ class AppBuilder:
             return
 
         fap_icons = self.app_env.CompileIcons(
-            self.app_env.Dir(self.app_work_dir),
+            self.app_work_dir,
             self.app._appdir.Dir(self.app.fap_icon_assets),
-            icon_bundle_name=f"{self.app.fap_icon_assets_symbol if self.app.fap_icon_assets_symbol else self.app.appid }_icons",
+            icon_bundle_name=f"{self.app.fap_icon_assets_symbol or self.app.appid }_icons",
         )
         self.app_env.Alias("_fap_icons", fap_icons)
         self.fw_env.Append(_APP_ICONS=[fap_icons])
+        self.icons_src = next(filter(lambda n: n.path.endswith(".c"), fap_icons))
 
     def _build_private_libs(self):
         for lib_def in self.app.fap_private_libs:
             self.private_libs.append(self._build_private_lib(lib_def))
 
     def _build_private_lib(self, lib_def):
-        lib_src_root_path = os.path.join(self.app_work_dir, "lib", lib_def.name)
+        lib_src_root_path = self.app_work_dir.Dir("lib").Dir(lib_def.name)
         self.app_env.AppendUnique(
             CPPPATH=list(
                 self.app_env.Dir(lib_src_root_path)
@@ -113,68 +124,88 @@ class AppBuilder:
 
         private_lib_env = self.app_env.Clone()
         private_lib_env.AppendUnique(
-            CCFLAGS=[
-                *lib_def.cflags,
-            ],
+            CCFLAGS=lib_def.cflags,
             CPPDEFINES=lib_def.cdefines,
             CPPPATH=list(
                 map(
-                    lambda cpath: extract_abs_dir_path(self.app._appdir.Dir(cpath)),
+                    lambda cpath: resolve_real_dir_node(self.app._appdir.Dir(cpath)),
                     lib_def.cincludes,
                 )
             ),
         )
 
         return private_lib_env.StaticLibrary(
-            os.path.join(self.app_work_dir, lib_def.name),
+            self.app_work_dir.File(lib_def.name),
             lib_sources,
         )
 
     def _build_app(self):
+        if self.app.fap_file_assets:
+            self.app._assets_dirs = [self.app._appdir.Dir(self.app.fap_file_assets)]
+
         self.app_env.Append(
-            LIBS=[*self.app.fap_libs, *self.private_libs],
-            CPPPATH=self.app_env.Dir(self.app_work_dir),
+            LIBS=[*self.app.fap_libs, *self.private_libs, *self.app.fap_libs],
+            CPPPATH=[self.app_env.Dir(self.app_work_dir), self.app._appdir],
         )
 
-        app_sources = list(
-            itertools.chain.from_iterable(
-                self.app_env.GlobRecursive(
-                    source_type,
-                    self.app_work_dir,
-                    exclude="lib",
-                )
-                for source_type in self.app.sources
-            )
+        app_sources = self.app_env.GatherSources(
+            [self.app.sources, "!lib"], self.app_work_dir
         )
+
+        if not app_sources:
+            raise UserError(f"No source files found for {self.app.appid}")
+
+        # Ensure that icons are included in the build, regardless of user-configured sources
+        if self.icons_src and not self.icons_src in app_sources:
+            app_sources.append(self.icons_src)
+
+        ## Uncomment for debug
+        # print(f"App sources for {self.app.appid}: {list(f.path for f in app_sources)}")
 
         app_artifacts = FlipperExternalAppInfo(self.app)
         app_artifacts.debug = self.app_env.Program(
-            os.path.join(self.ext_apps_work_dir, f"{self.app.appid}_d"),
+            self.ext_apps_work_dir.File(f"{self.app.appid}_d.elf"),
             app_sources,
             APP_ENTRY=self.app.entry_point,
         )[0]
 
         app_artifacts.compact = self.app_env.EmbedAppMetadata(
-            os.path.join(self.ext_apps_work_dir, self.app.appid),
+            self.ext_apps_work_dir.File(f"{self.app.appid}.fap"),
             app_artifacts.debug,
             APP=self.app,
         )[0]
 
+        if self.app.embeds_plugins:
+            self.app._assets_dirs.append(self.app_work_dir.Dir("assets"))
+
         app_artifacts.validator = self.app_env.ValidateAppImports(
-            app_artifacts.compact
+            app_artifacts.compact,
+            _CHECK_APP=self.app.do_strict_import_checks
+            and self.app_env.get("STRICT_FAP_IMPORT_CHECK"),
         )[0]
 
         if self.app.apptype == FlipperAppType.PLUGIN:
             for parent_app_id in self.app.requires:
-                fal_path = (
-                    f"apps_data/{parent_app_id}/plugins/{app_artifacts.compact.name}"
-                )
-                deployable = True
-                # If it's a plugin for a non-deployable app, don't include it in the resources
-                if parent_app := self.app._appmanager.get(parent_app_id):
-                    if not parent_app.is_default_deployable:
-                        deployable = False
-                app_artifacts.dist_entries.append((deployable, fal_path))
+                if self.app.fal_embedded:
+                    parent_app = self.app._appmanager.get(parent_app_id)
+                    if not parent_app:
+                        raise UserError(
+                            f"Embedded plugin {self.app.appid} requires unknown app {parent_app_id}"
+                        )
+                    self.app_env.Install(
+                        target=self.get_app_work_dir(self.app_env, parent_app)
+                        .Dir("assets")
+                        .Dir("plugins"),
+                        source=app_artifacts.compact,
+                    )
+                else:
+                    fal_path = f"apps_data/{parent_app_id}/plugins/{app_artifacts.compact.name}"
+                    deployable = True
+                    # If it's a plugin for a non-deployable app, don't include it in the resources
+                    if parent_app := self.app._appmanager.get(parent_app_id):
+                        if not parent_app.is_default_deployable:
+                            deployable = False
+                    app_artifacts.dist_entries.append((deployable, fal_path))
         else:
             fap_path = f"apps/{self.app.fap_category}/{app_artifacts.compact.name}"
             app_artifacts.dist_entries.append(
@@ -188,7 +219,7 @@ class AppBuilder:
         # Extra things to clean up along with the app
         self.app_env.Clean(
             app_artifacts.debug,
-            [*self.externally_built_files, self.app_env.Dir(self.app_work_dir)],
+            [*self.externally_built_files, self.app_work_dir],
         )
 
         # Create listing of the app
@@ -213,13 +244,11 @@ class AppBuilder:
             )
 
         # Add dependencies on file assets
-        if self.app.fap_file_assets:
+        for assets_dir in self.app._assets_dirs:
+            glob_res = self.app_env.GlobRecursive("*", assets_dir)
             self.app_env.Depends(
                 app_artifacts.compact,
-                self.app_env.GlobRecursive(
-                    "*",
-                    self.app._appdir.Dir(self.app.fap_file_assets),
-                ),
+                (*glob_res, assets_dir),
             )
 
         # Always run the validator for the app's binary when building the app
@@ -234,6 +263,8 @@ def BuildAppElf(env, app):
 
 
 def prepare_app_metadata(target, source, env):
+    metadata_node = next(filter(lambda t: t.name.endswith(_FAP_META_SECTION), target))
+
     sdk_cache = SdkCache(env["SDK_DEFINITION"].path, load_version_only=True)
 
     if not sdk_cache.is_buildable():
@@ -242,8 +273,7 @@ def prepare_app_metadata(target, source, env):
         )
 
     app = env["APP"]
-    meta_file_name = source[0].path + ".meta"
-    with open(meta_file_name, "wb") as f:
+    with open(metadata_node.abspath, "wb") as f:
         f.write(
             assemble_manifest_data(
                 app_manifest=app,
@@ -253,7 +283,7 @@ def prepare_app_metadata(target, source, env):
         )
 
 
-def validate_app_imports(target, source, env):
+def _validate_app_imports(target, source, env):
     sdk_cache = SdkCache(env["SDK_DEFINITION"].path, load_version_only=False)
     app_syms = set()
     with open(target[0].path, "rt") as f:
@@ -271,7 +301,10 @@ def validate_app_imports(target, source, env):
                 + fg.brightmagenta(f"{disabled_api_syms}")
                 + fg.brightyellow(")")
             )
-        SCons.Warnings.warn(SCons.Warnings.LinkWarning, warning_msg),
+        if env.get("_CHECK_APP"):
+            raise UserError(warning_msg)
+        else:
+            SCons.Warnings.warn(SCons.Warnings.LinkWarning, warning_msg),
 
 
 def GetExtAppByIdOrPath(env, app_dir):
@@ -284,7 +317,7 @@ def GetExtAppByIdOrPath(env, app_dir):
     try:
         # Maybe user passed an appid?
         app = appmgr.get(app_dir)
-    except FlipperManifestException as _:
+    except FlipperManifestException:
         # Look up path components in known app dirs
         for dir_part in reversed(pathlib.Path(app_dir).parts):
             if app := appmgr.find_by_appdir(dir_part):
@@ -302,59 +335,34 @@ def GetExtAppByIdOrPath(env, app_dir):
     return app_artifacts
 
 
-def resources_fap_dist_emitter(target, source, env):
-    # Initially we have a single target - target dir
-    # Here we inject pairs of (target, source) for each file
-    resources_root = target[0]
-
-    target = []
-    for app_artifacts in env["EXT_APPS"].values():
-        for _, dist_path in filter(
-            lambda dist_entry: dist_entry[0], app_artifacts.dist_entries
-        ):
-            source.append(app_artifacts.compact)
-            target.append(resources_root.File(dist_path))
-
-    assert len(target) == len(source)
-    return (target, source)
-
-
-def resources_fap_dist_action(target, source, env):
-    # FIXME: find a proper way to remove stale files
-    target_dir = env.Dir("${RESOURCES_ROOT}/apps")
-    shutil.rmtree(target_dir.path, ignore_errors=True)
-
-    # Iterate over pairs generated in emitter
-    for src, target in zip(source, target):
-        os.makedirs(os.path.dirname(target.path), exist_ok=True)
-        shutil.copy(src.path, target.path)
-
-
-def embed_app_metadata_emitter(target, source, env):
+def _embed_app_metadata_emitter(target, source, env):
     app = env["APP"]
 
     # Hack: change extension for fap libs
     if app.apptype == FlipperAppType.PLUGIN:
         target[0].name = target[0].name.replace(".fap", ".fal")
 
-    meta_file_name = source[0].path + ".meta"
-    target.append("#" + meta_file_name)
+    app_work_dir = AppBuilder.get_app_work_dir(env, app)
+    app._section_fapmeta = app_work_dir.File(_FAP_META_SECTION)
+    target.append(app._section_fapmeta)
 
-    if app.fap_file_assets:
-        files_section = source[0].path + ".files.section"
-        target.append("#" + files_section)
+    # At this point, we haven't added dir with embedded plugins to _assets_dirs yet
+    if app._assets_dirs or app.embeds_plugins:
+        app._section_fapfileassets = app_work_dir.File(_FAP_FILEASSETS_SECTION)
+        target.append(app._section_fapfileassets)
 
     return (target, source)
 
 
-def prepare_app_files(target, source, env):
-    app = env["APP"]
-    directory = app._appdir.Dir(app.fap_file_assets)
-    if not directory.exists():
-        raise UserError(f"File asset directory {directory} does not exist")
+def prepare_app_file_assets(target, source, env):
+    files_section_node = next(
+        filter(lambda t: t.name.endswith(_FAP_FILEASSETS_SECTION), target)
+    )
 
-    bundler = FileBundler(directory.abspath)
-    bundler.export(source[0].path + ".files.section")
+    bundler = FileBundler(
+        list(env.Dir(asset_dir).abspath for asset_dir in env["APP"]._assets_dirs)
+    )
+    bundler.export(files_section_node.abspath)
 
 
 def generate_embed_app_metadata_actions(source, target, env, for_signature):
@@ -364,45 +372,146 @@ def generate_embed_app_metadata_actions(source, target, env, for_signature):
         Action(prepare_app_metadata, "$APPMETA_COMSTR"),
     ]
 
-    objcopy_str = (
-        "${OBJCOPY} "
-        "--remove-section .ARM.attributes "
-        "--add-section .fapmeta=${SOURCE}.meta "
+    objcopy_args = [
+        "${OBJCOPY}",
+        "--remove-section",
+        ".ARM.attributes",
+        "--add-section",
+        "${_FAP_META_SECTION}=${APP._section_fapmeta}",
+        "--set-section-flags",
+        "${_FAP_META_SECTION}=contents,noload,readonly,data",
+    ]
+
+    if app._section_fapfileassets:
+        actions.append(Action(prepare_app_file_assets, "$APPFILE_COMSTR"))
+        objcopy_args.extend(
+            (
+                "--add-section",
+                "${_FAP_FILEASSETS_SECTION}=${APP._section_fapfileassets}",
+                "--set-section-flags",
+                "${_FAP_FILEASSETS_SECTION}=contents,noload,readonly,data",
+            )
+        )
+
+    objcopy_args.extend(
+        (
+            "--strip-debug",
+            "--strip-unneeded",
+            "--add-gnu-debuglink=${SOURCE}",
+            "${SOURCES}",
+            "${TARGET}",
+        )
     )
 
-    if app.fap_file_assets:
-        actions.append(Action(prepare_app_files, "$APPFILE_COMSTR"))
-        objcopy_str += "--add-section .fapassets=${SOURCE}.files.section "
-
-    objcopy_str += (
-        "--set-section-flags .fapmeta=contents,noload,readonly,data "
-        "--strip-debug --strip-unneeded "
-        "--add-gnu-debuglink=${SOURCE} "
-        "${SOURCES} ${TARGET}"
-    )
-
-    actions.append(
-        Action(
-            objcopy_str,
-            "$APPMETAEMBED_COMSTR",
+    actions.extend(
+        (
+            Action(
+                [objcopy_args],
+                "$APPMETAEMBED_COMSTR",
+            ),
+            Action(
+                [
+                    [
+                        "${PYTHON3}",
+                        "${FBT_SCRIPT_DIR}/fastfap.py",
+                        "${TARGET}",
+                        "${OBJCOPY}",
+                    ]
+                ],
+                "$FASTFAP_COMSTR",
+            ),
         )
     )
 
     return Action(actions)
 
 
+@dataclass
+class AppDeploymentComponents:
+    deploy_sources: Dict[str, object] = field(default_factory=dict)
+    validators: List[object] = field(default_factory=list)
+    extra_launch_args: str = ""
+
+    def add_app(self, app_artifacts):
+        for _, ext_path in app_artifacts.dist_entries:
+            self.deploy_sources[f"/ext/{ext_path}"] = app_artifacts.compact
+        self.validators.append(app_artifacts.validator)
+
+
+def _gather_app_components(env, appname) -> AppDeploymentComponents:
+    components = AppDeploymentComponents()
+
+    def _add_host_app_to_targets(host_app):
+        artifacts_app_to_run = env["EXT_APPS"].get(host_app.appid, None)
+        components.add_app(artifacts_app_to_run)
+        for plugin in host_app._plugins:
+            components.add_app(env["EXT_APPS"].get(plugin.appid, None))
+
+    artifacts_app_to_run = env.GetExtAppByIdOrPath(appname)
+    if artifacts_app_to_run.app.apptype == FlipperAppType.PLUGIN:
+        # We deploy host app instead
+        host_app = env["APPMGR"].get(artifacts_app_to_run.app.requires[0])
+
+        if host_app:
+            if host_app.apptype in [
+                FlipperAppType.EXTERNAL,
+                FlipperAppType.MENUEXTERNAL,
+            ]:
+                components.add_app(host_app)
+            else:
+                # host app is a built-in app
+                components.add_app(artifacts_app_to_run)
+                if host_app.name:
+                    components.extra_launch_args = f"-a {host_app.name}"
+        else:
+            raise UserError("Host app is unknown")
+    else:
+        _add_host_app_to_targets(artifacts_app_to_run.app)
+    return components
+
+
+def AddAppLaunchTarget(env, appname, launch_target_name):
+    components = _gather_app_components(env, appname)
+    target = env.PhonyTarget(
+        launch_target_name,
+        [
+            [
+                "${PYTHON3}",
+                "${APP_RUN_SCRIPT}",
+                "-p",
+                "${FLIP_PORT}",
+                "${EXTRA_ARGS}",
+                "-s",
+                "${SOURCES}",
+                "-t",
+                "${FLIPPER_FILE_TARGETS}",
+            ]
+        ],
+        source=components.deploy_sources.values(),
+        FLIPPER_FILE_TARGETS=components.deploy_sources.keys(),
+        EXTRA_ARGS=components.extra_launch_args,
+    )
+    env.Alias(launch_target_name, components.validators)
+    return target
+
+
+def AddAppBuildTarget(env, appname, build_target_name):
+    components = _gather_app_components(env, appname)
+    env.Alias(build_target_name, components.validators)
+    env.Alias(build_target_name, components.deploy_sources.values())
+
+
 def generate(env, **kw):
     env.SetDefault(
-        EXT_APPS_WORK_DIR="${FBT_FAP_DEBUG_ELF_ROOT}",
+        EXT_APPS_WORK_DIR=env.Dir(env["FBT_FAP_DEBUG_ELF_ROOT"]),
         APP_RUN_SCRIPT="${FBT_SCRIPT_DIR}/runfap.py",
-        STORAGE_SCRIPT="${FBT_SCRIPT_DIR}/storage.py",
     )
     if not env["VERBOSE"]:
         env.SetDefault(
-            FAPDISTCOMSTR="\tFAPDIST\t${TARGET}",
             APPMETA_COMSTR="\tAPPMETA\t${TARGET}",
             APPFILE_COMSTR="\tAPPFILE\t${TARGET}",
             APPMETAEMBED_COMSTR="\tFAP\t${TARGET}",
+            FASTFAP_COMSTR="\tFASTFAP\t${TARGET}",
             APPCHECK_COMSTR="\tAPPCHK\t${SOURCE}",
         )
 
@@ -410,24 +519,22 @@ def generate(env, **kw):
         EXT_APPS={},  # appid -> FlipperExternalAppInfo
         EXT_LIBS={},
         _APP_ICONS=[],
+        _FAP_META_SECTION=_FAP_META_SECTION,
+        _FAP_FILEASSETS_SECTION=_FAP_FILEASSETS_SECTION,
     )
 
     env.AddMethod(BuildAppElf)
     env.AddMethod(GetExtAppByIdOrPath)
+    env.AddMethod(AddAppLaunchTarget)
+    env.AddMethod(AddAppBuildTarget)
+
     env.Append(
         BUILDERS={
-            "FapDist": Builder(
-                action=Action(
-                    resources_fap_dist_action,
-                    "$FAPDISTCOMSTR",
-                ),
-                emitter=resources_fap_dist_emitter,
-            ),
             "EmbedAppMetadata": Builder(
                 generator=generate_embed_app_metadata_actions,
                 suffix=".fap",
                 src_suffix=".elf",
-                emitter=embed_app_metadata_emitter,
+                emitter=_embed_app_metadata_emitter,
             ),
             "ValidateAppImports": Builder(
                 action=[
@@ -436,7 +543,7 @@ def generate(env, **kw):
                         None,  # "$APPDUMP_COMSTR",
                     ),
                     Action(
-                        validate_app_imports,
+                        _validate_app_imports,
                         "$APPCHECK_COMSTR",
                     ),
                 ],
