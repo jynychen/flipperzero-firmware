@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define INFRARED_COMMON_CARRIER_FREQUENCY ((uint32_t)38000)
-#define INFRARED_COMMON_DUTY_CYCLE ((float)0.33)
+#define INFRARED_COMMON_DUTY_CYCLE        ((float)0.33)
 
 /* if we want to see split raw signals during bruteforce,
  * we have to have RX raw timing delay less than TX */
@@ -33,6 +33,9 @@ typedef enum {
     InfraredProtocolSIRC15,
     InfraredProtocolSIRC20,
     InfraredProtocolKaseikyo,
+    InfraredProtocolRCA,
+    InfraredProtocolPioneer,
+    /* Add new protocols here */
     InfraredProtocolMAX,
 } InfraredProtocol;
 

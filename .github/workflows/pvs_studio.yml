@@ -4,29 +4,25 @@ on:
   push:
     branches:
       - dev
-      - "release*"
-    tags:
-      - '*'
   pull_request:
 
 env:
   TARGETS: f7
   DEFAULT_TARGET: f7
   FBT_TOOLCHAIN_PATH: /runner/_work
+  FBT_GIT_SUBMODULE_SHALLOW: 1
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   analyse_c_cpp:
     if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: [self-hosted, FlipperZeroShell]
     steps:
-      - name: 'Decontaminate previous build leftovers'
-        run: |
-          if [ -d .git ]; then
-            git submodule status || git checkout "$(git rev-list --max-parents=0 HEAD | tail -n 1)"
-          fi
+      - name: 'Wipe workspace'
+        run: find ./ -mount -maxdepth 1 -exec rm -rf {} \;
 
       - name: 'Checkout code'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha }}
@@ -41,7 +37,7 @@ jobs:
           else
             TYPE="other"
           fi
-          python3 scripts/get_env.py "--event_file=${{ github.event_path }}" "--type=$TYPE"
+          python3 scripts/get_env.py "--event_file=${{ github.event_path }}" "--type=$TYPE" || cat "${{ github.event_path }}"
 
       - name: 'Supply PVS credentials'
         run: |
@@ -53,6 +49,9 @@ jobs:
           WARNINGS=0
           ./fbt COMPACT=1 PVSNOBROWSER=1 firmware_pvs || WARNINGS=1
           echo "warnings=${WARNINGS}" >> $GITHUB_OUTPUT
+          if [[ $WARNINGS -ne 0 ]]; then
+            echo "report-url=https://pvs.flipp.dev/${{steps.names.outputs.branch_name}}/${{steps.names.outputs.default_target}}-${{steps.names.outputs.suffix}}/index.html" >> $GITHUB_OUTPUT
+          fi
 
       - name: 'Upload report'
         if: ${{ !github.event.pull_request.head.repo.fork && (steps.pvs-warn.outputs.warnings != 0) }}
@@ -67,7 +66,7 @@ jobs:
 
       - name: 'Find Previous Comment'
         if: ${{ !github.event.pull_request.head.repo.fork && github.event.pull_request && (steps.pvs-warn.outputs.warnings != 0) }}
-        uses: peter-evans/find-comment@v2
+        uses: peter-evans/find-comment@v3
         id: fc
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -76,18 +75,19 @@ jobs:
 
       - name: 'Create or update comment'
         if: ${{ !github.event.pull_request.head.repo.fork && github.event.pull_request && (steps.pvs-warn.outputs.warnings != 0) }}
-        uses: peter-evans/create-or-update-comment@v1
+        uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             **PVS-Studio report for commit `${{steps.names.outputs.commit_sha}}`:**
-            - [Report](https://pvs.flipp.dev/${{steps.names.outputs.branch_name}}/${{steps.names.outputs.default_target}}-${{steps.names.outputs.suffix}}/index.html)
+            - [Report](${{ steps.pvs-warn.outputs.report-url }})
           edit-mode: replace
 
       - name: 'Raise exception'
         if: ${{ steps.pvs-warn.outputs.warnings != 0 }}
         run: |
           echo "Please fix all PVS warnings before merge"
+          echo "Report: ${{ steps.pvs-warn.outputs.report-url }}"
+          echo "[PVS report](${{ steps.pvs-warn.outputs.report-url }})" >> $GITHUB_STEP_SUMMARY
           exit 1
-

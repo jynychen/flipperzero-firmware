@@ -3,6 +3,8 @@
 #include <toolbox/stream/stream.h>
 #include <flipper_format/flipper_format.h>
 #include <flipper_format/flipper_format_i.h>
+#include <lib/subghz/devices/devices.h>
+#include <lib/toolbox/strint.h>
 
 #define TAG "SubGhzFileEncoderWorker"
 
@@ -17,10 +19,10 @@ struct SubGhzFileEncoderWorker {
 
     volatile bool worker_running;
     volatile bool worker_stoping;
-    bool level;
     bool is_storage_slow;
     FuriString* str_data;
     FuriString* file_path;
+    const SubGhzDevice* device;
 
     SubGhzFileEncoderWorkerCallbackEnd callback_end;
     void* context_end;
@@ -39,43 +41,31 @@ void subghz_file_encoder_worker_callback_end(
 void subghz_file_encoder_worker_add_level_duration(
     SubGhzFileEncoderWorker* instance,
     int32_t duration) {
-    bool res = true;
-    if(duration < 0 && !instance->level) {
-        res = false;
-    } else if(duration > 0 && instance->level) {
-        res = false;
-    }
-
-    if(res) {
-        instance->level = !instance->level;
-        furi_stream_buffer_send(instance->stream, &duration, sizeof(int32_t), 100);
-    } else {
-        FURI_LOG_E(TAG, "Invalid level in the stream");
-    }
+    size_t ret = furi_stream_buffer_send(instance->stream, &duration, sizeof(int32_t), 100);
+    if(sizeof(int32_t) != ret) FURI_LOG_E(TAG, "Invalid add duration in the stream");
 }
 
 bool subghz_file_encoder_worker_data_parse(SubGhzFileEncoderWorker* instance, const char* strStart) {
-    char* str1;
-    bool res = false;
     // Line sample: "RAW_Data: -1, 2, -2..."
 
-    // Look for a key in the line
-    str1 = strstr(strStart, "RAW_Data: ");
+    // Look for the key in the line
+    char* str = strstr(strStart, "RAW_Data: ");
+    bool res = false;
 
-    if(str1 != NULL) {
+    if(str) {
         // Skip key
-        str1 = strchr(str1, ' ');
+        str = strchr(str, ' ');
 
-        // Check that there is still an element in the line
-        while(strchr(str1, ' ') != NULL) {
-            str1 = strchr(str1, ' ');
-
-            // Skip space
-            str1 += 1;
-            subghz_file_encoder_worker_add_level_duration(instance, atoi(str1));
+        // Parse next element
+        int32_t duration;
+        while(strint_to_int32(str, &str, &duration, 10) == StrintParseNoError) {
+            subghz_file_encoder_worker_add_level_duration(instance, duration);
+            if(*str == ',') str++; // could also be `\0`
         }
+
         res = true;
     }
+
     return res;
 }
 
@@ -156,10 +146,13 @@ static int32_t subghz_file_encoder_worker_thread(void* context) {
     if(instance->is_storage_slow) {
         FURI_LOG_E(TAG, "Storage is slow");
     }
+
     FURI_LOG_I(TAG, "End read file");
-    while(!furi_hal_subghz_is_async_tx_complete() && instance->worker_running) {
+    while(instance->device && !subghz_devices_is_async_complete_tx(instance->device) &&
+          instance->worker_running) {
         furi_delay_ms(5);
     }
+
     FURI_LOG_I(TAG, "End transmission");
     while(instance->worker_running) {
         if(instance->worker_stoping) {
@@ -173,7 +166,7 @@ static int32_t subghz_file_encoder_worker_thread(void* context) {
     return 0;
 }
 
-SubGhzFileEncoderWorker* subghz_file_encoder_worker_alloc() {
+SubGhzFileEncoderWorker* subghz_file_encoder_worker_alloc(void) {
     SubGhzFileEncoderWorker* instance = malloc(sizeof(SubGhzFileEncoderWorker));
 
     instance->thread =
@@ -185,7 +178,6 @@ SubGhzFileEncoderWorker* subghz_file_encoder_worker_alloc() {
 
     instance->str_data = furi_string_alloc();
     instance->file_path = furi_string_alloc();
-    instance->level = false;
     instance->worker_stoping = true;
 
     return instance;
@@ -206,12 +198,18 @@ void subghz_file_encoder_worker_free(SubGhzFileEncoderWorker* instance) {
     free(instance);
 }
 
-bool subghz_file_encoder_worker_start(SubGhzFileEncoderWorker* instance, const char* file_path) {
+bool subghz_file_encoder_worker_start(
+    SubGhzFileEncoderWorker* instance,
+    const char* file_path,
+    const char* radio_device_name) {
     furi_assert(instance);
     furi_assert(!instance->worker_running);
 
     furi_stream_buffer_reset(instance->stream);
     furi_string_set(instance->file_path, file_path);
+    if(radio_device_name) {
+        instance->device = subghz_devices_get_by_name(radio_device_name);
+    }
     instance->worker_running = true;
     furi_thread_start(instance->thread);
 

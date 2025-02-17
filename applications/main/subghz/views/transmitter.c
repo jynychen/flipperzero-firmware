@@ -1,6 +1,6 @@
 #include "transmitter.h"
-#include "../subghz_i.h"
 
+#include <assets_icons.h>
 #include <input/input.h>
 #include <gui/elements.h>
 
@@ -14,7 +14,11 @@ typedef struct {
     FuriString* frequency_str;
     FuriString* preset_str;
     FuriString* key_str;
-    uint8_t show_button;
+    bool show_button;
+    SubGhzRadioDeviceType device_type;
+    SubGhzViewTransmitterModelType model_type;
+    IconAnimation* icon_int_ant;
+    IconAnimation* icon_ext_ant;
 } SubGhzViewTransmitterModel;
 
 void subghz_view_transmitter_set_callback(
@@ -32,7 +36,7 @@ void subghz_view_transmitter_add_data_to_show(
     const char* key_str,
     const char* frequency_str,
     const char* preset_str,
-    uint8_t show_button) {
+    bool show_button) {
     furi_assert(subghz_transmitter);
     with_view_model(
         subghz_transmitter->view,
@@ -46,6 +50,28 @@ void subghz_view_transmitter_add_data_to_show(
         true);
 }
 
+void subghz_view_transmitter_set_radio_device_type(
+    SubGhzViewTransmitter* subghz_transmitter,
+    SubGhzRadioDeviceType device_type) {
+    furi_assert(subghz_transmitter);
+    with_view_model(
+        subghz_transmitter->view,
+        SubGhzViewTransmitterModel * model,
+        { model->device_type = device_type; },
+        true);
+}
+
+void subghz_view_transmitter_set_model_type(
+    SubGhzViewTransmitter* subghz_transmitter,
+    SubGhzViewTransmitterModelType model_type) {
+    furi_assert(subghz_transmitter);
+    with_view_model(
+        subghz_transmitter->view,
+        SubGhzViewTransmitterModel * model,
+        { model->model_type = model_type; },
+        true);
+}
+
 static void subghz_view_transmitter_button_right(Canvas* canvas, const char* str) {
     const uint8_t button_height = 12;
     const uint8_t vertical_offset = 3;
@@ -56,7 +82,7 @@ static void subghz_view_transmitter_button_right(Canvas* canvas, const char* str
     const uint8_t icon_width_with_offset = icon_get_width(icon) + icon_offset;
     const uint8_t button_width = string_width + horizontal_offset * 2 + icon_width_with_offset;
 
-    const uint8_t x = (canvas_width(canvas) - button_width) / 2 + 40;
+    const uint8_t x = (canvas_width(canvas) - button_width) / 2 + 44;
     const uint8_t y = canvas_height(canvas);
 
     canvas_draw_box(canvas, x, y - button_height, button_width, button_height);
@@ -88,7 +114,22 @@ void subghz_view_transmitter_draw(Canvas* canvas, SubGhzViewTransmitterModel* mo
         canvas, 0, 0, AlignLeft, AlignTop, furi_string_get_cstr(model->key_str));
     canvas_draw_str(canvas, 78, 7, furi_string_get_cstr(model->frequency_str));
     canvas_draw_str(canvas, 113, 7, furi_string_get_cstr(model->preset_str));
-    if(model->show_button) subghz_view_transmitter_button_right(canvas, "Send");
+
+    if(model->show_button) {
+        if(model->model_type == SubGhzViewTransmitterModelTypeInfo) {
+            elements_button_center(canvas, "Send");
+            elements_button_right(canvas, "Save");
+        } else {
+            //default type SubGhzViewTransmitterModelTypeTx
+            subghz_view_transmitter_button_right(canvas, "Send");
+        }
+
+        if(model->device_type == SubGhzRadioDeviceTypeInternal) {
+            canvas_draw_icon_animation(canvas, 109, 40, model->icon_int_ant);
+        } else {
+            canvas_draw_icon_animation(canvas, 109, 40, model->icon_ext_ant);
+        }
+    }
 }
 
 bool subghz_view_transmitter_input(InputEvent* event, void* context) {
@@ -104,7 +145,7 @@ bool subghz_view_transmitter_input(InputEvent* event, void* context) {
                 furi_string_reset(model->frequency_str);
                 furi_string_reset(model->preset_str);
                 furi_string_reset(model->key_str);
-                model->show_button = 0;
+                model->show_button = false;
             },
             false);
         return false;
@@ -121,13 +162,32 @@ bool subghz_view_transmitter_input(InputEvent* event, void* context) {
         true);
 
     if(can_be_sent && event->key == InputKeyOk && event->type == InputTypePress) {
+        with_view_model(
+            subghz_transmitter->view,
+            SubGhzViewTransmitterModel * model,
+            {
+                icon_animation_start(model->icon_int_ant);
+                icon_animation_start(model->icon_ext_ant);
+            },
+            false);
         subghz_transmitter->callback(
             SubGhzCustomEventViewTransmitterSendStart, subghz_transmitter->context);
         return true;
     } else if(can_be_sent && event->key == InputKeyOk && event->type == InputTypeRelease) {
+        with_view_model(
+            subghz_transmitter->view,
+            SubGhzViewTransmitterModel * model,
+            {
+                icon_animation_stop(model->icon_int_ant);
+                icon_animation_stop(model->icon_ext_ant);
+            },
+            false);
         subghz_transmitter->callback(
             SubGhzCustomEventViewTransmitterSendStop, subghz_transmitter->context);
         return true;
+    } else if(can_be_sent && event->key == InputKeyRight && event->type == InputTypeShort) {
+        subghz_transmitter->callback(
+            SubGhzCustomEventViewTransmitterSendSave, subghz_transmitter->context);
     }
 
     return true;
@@ -141,7 +201,7 @@ void subghz_view_transmitter_exit(void* context) {
     furi_assert(context);
 }
 
-SubGhzViewTransmitter* subghz_view_transmitter_alloc() {
+SubGhzViewTransmitter* subghz_view_transmitter_alloc(void) {
     SubGhzViewTransmitter* subghz_transmitter = malloc(sizeof(SubGhzViewTransmitter));
 
     // View allocation and configuration
@@ -162,6 +222,11 @@ SubGhzViewTransmitter* subghz_view_transmitter_alloc() {
             model->frequency_str = furi_string_alloc();
             model->preset_str = furi_string_alloc();
             model->key_str = furi_string_alloc();
+            model->model_type = SubGhzViewTransmitterModelTypeTx;
+            model->icon_int_ant = icon_animation_alloc(&A_SubGhz_Internal_ant);
+            view_tie_icon_animation(subghz_transmitter->view, model->icon_int_ant);
+            model->icon_ext_ant = icon_animation_alloc(&A_SubGhz_External_ant);
+            view_tie_icon_animation(subghz_transmitter->view, model->icon_ext_ant);
         },
         true);
     return subghz_transmitter;
@@ -177,6 +242,8 @@ void subghz_view_transmitter_free(SubGhzViewTransmitter* subghz_transmitter) {
             furi_string_free(model->frequency_str);
             furi_string_free(model->preset_str);
             furi_string_free(model->key_str);
+            icon_animation_free(model->icon_int_ant);
+            icon_animation_free(model->icon_ext_ant);
         },
         true);
     view_free(subghz_transmitter->view);

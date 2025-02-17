@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 
+import operator
+from functools import reduce
+import time
+
 from flipper.app import App
 from flipper.storage import FlipperStorage, FlipperStorageOperations
 from flipper.utils.cdc import resolve_port
 
-import os
-import posixpath
-from functools import reduce
-import operator
-
 
 class Main(App):
+    APP_POST_CLOSE_DELAY_SEC = 0.2
+
     def init(self):
         self.parser.add_argument("-p", "--port", help="CDC Port", default="auto")
         self.parser.add_argument(
@@ -38,8 +39,8 @@ class Main(App):
         self.parser.set_defaults(func=self.install)
 
     @staticmethod
-    def flatten(l):
-        return reduce(operator.concat, l, [])
+    def flatten(item_list):
+        return reduce(operator.concat, item_list, [])
 
     def install(self):
         self.args.sources = self.flatten(self.args.sources)
@@ -65,12 +66,29 @@ class Main(App):
                     storage_ops.recursive_send(fap_dst_path, fap_local_path, False)
 
                 fap_host_app = self.args.targets[0]
-                startup_command = f'"Applications" {fap_host_app}'
+                startup_command = f"{fap_host_app}"
                 if self.args.host_app:
                     startup_command = self.args.host_app
 
+                self.logger.info("Closing current app, if any")
+                for _ in range(10):
+                    storage.send_and_wait_eol("loader close\r")
+                    result = storage.read.until(storage.CLI_EOL)
+                    if b"was closed" in result:
+                        self.logger.info("App closed")
+                        storage.read.until(storage.CLI_EOL)
+                        time.sleep(self.APP_POST_CLOSE_DELAY_SEC)
+                    elif result.startswith(b"No application"):
+                        storage.read.until(storage.CLI_EOL)
+                        break
+                    else:
+                        self.logger.error(
+                            f"Unexpected response: {result.decode('ascii')}"
+                        )
+                        return 4
+
                 self.logger.info(f"Launching app: {startup_command}")
-                storage.send_and_wait_eol(f"loader open {startup_command}\r")
+                storage.send_and_wait_eol(f'loader open "{startup_command}"\r')
 
                 if len(result := storage.read.until(storage.CLI_EOL)):
                     self.logger.error(f"Unexpected response: {result.decode('ascii')}")

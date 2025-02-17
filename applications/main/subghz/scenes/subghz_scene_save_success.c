@@ -11,8 +11,8 @@ void subghz_scene_save_success_on_enter(void* context) {
 
     // Setup view
     Popup* popup = subghz->popup;
-    popup_set_icon(popup, 32, 5, &I_DolphinNice_96x59);
-    popup_set_header(popup, "Saved!", 13, 22, AlignLeft, AlignBottom);
+    popup_set_icon(popup, 36, 5, &I_DolphinSaved_92x58);
+    popup_set_header(popup, "Saved", 15, 19, AlignLeft, AlignBottom);
     popup_set_timeout(popup, 1500);
     popup_set_context(popup, subghz);
     popup_set_callback(popup, subghz_scene_save_success_popup_callback);
@@ -26,10 +26,10 @@ bool subghz_scene_save_success_on_event(void* context, SceneManagerEvent event) 
         if(event.event == SubGhzCustomEventSceneSaveSuccess) {
             if(!scene_manager_search_and_switch_to_previous_scene(
                    subghz->scene_manager, SubGhzSceneReceiver)) {
-                subghz->txrx->rx_key_state = SubGhzRxKeyStateRAWSave;
+                subghz_rx_key_state_set(subghz, SubGhzRxKeyStateRAWSave);
                 if(!scene_manager_search_and_switch_to_previous_scene(
                        subghz->scene_manager, SubGhzSceneReadRAW)) {
-                    subghz->txrx->rx_key_state = SubGhzRxKeyStateIDLE;
+                    subghz_rx_key_state_set(subghz, SubGhzRxKeyStateIDLE);
                     if(!scene_manager_search_and_switch_to_previous_scene(
                            subghz->scene_manager, SubGhzSceneSaved)) {
                         scene_manager_next_scene(subghz->scene_manager, SubGhzSceneSaved);

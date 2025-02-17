@@ -1,4 +1,7 @@
-/*
+/**
+ * @file example_thermo.c
+ * @brief 1-Wire thermometer example.
+ *
  * This file contains an example application that reads and displays
  * the temperature from a DS18B20 1-wire thermometer.
  *
@@ -19,15 +22,18 @@
 #include <one_wire/maxim_crc.h>
 #include <one_wire/one_wire_host.h>
 
-#define UPDATE_PERIOD_MS 1000UL
-#define TEXT_STORE_SIZE 64U
+#include <furi_hal_power.h>
 
-#define DS18B20_CMD_CONVERT 0x44U
+#define UPDATE_PERIOD_MS 1000UL
+#define TEXT_STORE_SIZE  64U
+
+#define DS18B20_CMD_SKIP_ROM        0xccU
+#define DS18B20_CMD_CONVERT         0x44U
 #define DS18B20_CMD_READ_SCRATCHPAD 0xbeU
 
-#define DS18B20_CFG_RESOLUTION_POS 5U
+#define DS18B20_CFG_RESOLUTION_POS  5U
 #define DS18B20_CFG_RESOLUTION_MASK 0x03U
-#define DS18B20_DECIMAL_PART_MASK 0x0fU
+#define DS18B20_DECIMAL_PART_MASK   0x0fU
 
 #define DS18B20_SIGN_MASK 0xf0U
 
@@ -40,10 +46,10 @@
  - gpio_ext_pa4
  - gpio_ext_pa6
  - gpio_ext_pa7
- - ibutton_gpio
+ - gpio_ibutton
 */
 
-#define THERMO_GPIO_PIN (ibutton_gpio)
+#define THERMO_GPIO_PIN (gpio_ibutton)
 
 /* Flags which the reader thread responds to */
 typedef enum {
@@ -87,12 +93,12 @@ static void example_thermo_request_temperature(ExampleThermoContext* context) {
     bool success = false;
     do {
         /* Each communication with a 1-wire device starts by a reset.
-           The functon will return true if a device responded with a presence pulse. */
+           The function will return true if a device responded with a presence pulse. */
         if(!onewire_host_reset(onewire)) break;
         /* After the reset, a ROM operation must follow.
            If there is only one device connected, the "Skip ROM" command is most appropriate
            (it can also be used to address all of the connected devices in some cases).*/
-        onewire_host_skip(onewire);
+        onewire_host_write(onewire, DS18B20_CMD_SKIP_ROM);
         /* After the ROM operation, a device-specific command is issued.
            In this case, it's a request to start measuring the temperature. */
         onewire_host_write(onewire, DS18B20_CMD_CONVERT);
@@ -127,13 +133,13 @@ static void example_thermo_read_temperature(ExampleThermoContext* context) {
         size_t attempts_left = 10;
         do {
             /* Each communication with a 1-wire device starts by a reset.
-            The functon will return true if a device responded with a presence pulse. */
+            The function will return true if a device responded with a presence pulse. */
             if(!onewire_host_reset(onewire)) continue;
 
             /* After the reset, a ROM operation must follow.
             If there is only one device connected, the "Skip ROM" command is most appropriate
             (it can also be used to address all of the connected devices in some cases).*/
-            onewire_host_skip(onewire);
+            onewire_host_write(onewire, DS18B20_CMD_SKIP_ROM);
 
             /* After the ROM operation, a device-specific command is issued.
             This time, it will be the "Read Scratchpad" command which will
@@ -218,8 +224,7 @@ static void example_thermo_draw_callback(Canvas* canvas, void* ctx) {
     canvas_draw_line(canvas, 0, 16, 128, 16);
 
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str_aligned(
-        canvas, middle_x, 30, AlignCenter, AlignBottom, "Connnect thermometer");
+    canvas_draw_str_aligned(canvas, middle_x, 30, AlignCenter, AlignBottom, "Connect thermometer");
 
     snprintf(
         text_store,
@@ -234,7 +239,7 @@ static void example_thermo_draw_callback(Canvas* canvas, void* ctx) {
         float temp;
         char temp_units;
 
-        /* The applicaton is locale-aware.
+        /* The application is locale-aware.
            Change Settings->System->Units to check it out. */
         switch(locale_get_measurement_unit()) {
         case LocaleMeasurementUnitsMetric:
@@ -252,7 +257,7 @@ static void example_thermo_draw_callback(Canvas* canvas, void* ctx) {
         snprintf(text_store, TEXT_STORE_SIZE, "Temperature: %+.1f%c", (double)temp, temp_units);
     } else {
         /* Or show a message that no data is available */
-        strncpy(text_store, "-- No data --", TEXT_STORE_SIZE);
+        strlcpy(text_store, "-- No data --", TEXT_STORE_SIZE);
     }
 
     canvas_draw_str_aligned(canvas, middle_x, 58, AlignCenter, AlignBottom, text_store);
@@ -267,6 +272,9 @@ static void example_thermo_input_callback(InputEvent* event, void* ctx) {
 
 /* Starts the reader thread and handles the input */
 static void example_thermo_run(ExampleThermoContext* context) {
+    /* Enable power on external pins */
+    furi_hal_power_enable_otg();
+
     /* Configure the hardware in host mode */
     onewire_host_start(context->onewire);
 
@@ -299,12 +307,15 @@ static void example_thermo_run(ExampleThermoContext* context) {
 
     /* Reset the hardware */
     onewire_host_stop(context->onewire);
+
+    /* Disable power on external pins */
+    furi_hal_power_disable_otg();
 }
 
 /******************** Initialisation & startup *****************************/
 
 /* Allocate the memory and initialise the variables */
-static ExampleThermoContext* example_thermo_context_alloc() {
+static ExampleThermoContext* example_thermo_context_alloc(void) {
     ExampleThermoContext* context = malloc(sizeof(ExampleThermoContext));
 
     context->view_port = view_port_alloc();
@@ -346,7 +357,7 @@ int32_t example_thermo_main(void* p) {
     /* Allocate all of the necessary structures */
     ExampleThermoContext* context = example_thermo_context_alloc();
 
-    /* Start the applicaton's main loop. It won't return until the application was requested to exit. */
+    /* Start the application's main loop. It won't return until the application was requested to exit. */
     example_thermo_run(context);
 
     /* Release all unneeded resources */
